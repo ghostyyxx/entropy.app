@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Entropy.app</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #060605; }
+  * { box-sizing: border-box; }
+</style>
+
+<!-- React itself is the only framework dependency left. The JSX/app logic
+     below is already compiled to plain JavaScript, so no in-browser Babel
+     step is needed at all — one less thing that can fail. -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"
+  onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js';"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"
+  onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js';"></script>
+<script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"
+  onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';"></script>
+
+<script>
+  // Watchdog: if the app never mounts, show a real error instead of a blank page.
+  function showFatalError(msg, file, line) {
+    var root = document.getElementById('root');
+    if (!root || root.childElementCount > 0) return;
+    root.innerHTML =
+      '<div style="max-width:640px;margin:60px auto;padding:24px;background:#17130f;border:1px solid #B0231C;border-radius:8px;color:#E9E2D0;font-family:sans-serif;">' +
+      '<h2 style="color:#E7C77A;margin-top:0;">Entropy.app failed to load</h2>' +
+      '<p style="color:#C9BEA8;">' + (msg || 'An unknown error occurred.') + '</p>' +
+      (file ? '<p style="color:#6b6252;font-size:12px;">' + file + (line ? (':' + line) : '') + '</p>' : '') +
+      '<p style="color:#8A8072;font-size:13px;">Open your browser\'s developer console (F12 → Console) for full details.</p>' +
+      '</div>';
+  }
+  window.addEventListener('error', function (e) {
+    showFatalError((e && e.message) || 'Unknown script error', e && e.filename, e && e.lineno);
+  });
+  window.__entropyBooted = false;
+  setTimeout(function () {
+    if (window.__entropyBooted) return;
+    var missing = [];
+    if (typeof React === 'undefined') missing.push('React');
+    if (typeof ReactDOM === 'undefined') missing.push('ReactDOM');
+    showFatalError(
+      missing.length
+        ? 'These required scripts failed to load: ' + missing.join(', ') + '. Your network, firewall, or an ad-blocker may be blocking unpkg.com / jsdelivr.net.'
+        : 'React loaded, but the app never rendered. Check the browser console for the specific error.'
+    );
+  }, 5000);
+</script>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+"use strict";
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+// =============================================================================
+// SHARED DATABASE CONFIG — fill this in after creating your free Firebase
+// Realtime Database. See SETUP-INSTRUCTIONS.md that came with this file.
+// =============================================================================
+const FIREBASE_DB_URL = "PASTE_YOUR_FIREBASE_DATABASE_URL_HERE";
+// e.g. "https://your-project-default-rtdb.firebaseio.com"
+const FIREBASE_PATH = FIREBASE_DB_URL.replace(/\/$/, "") + "/entropyClanData.json";
+// -----------------------------------------------------------------------------
+// window.storage shim — the whole clan's data lives as ONE JSON object at a
+// single path in Firebase's Realtime Database. Every read pulls the whole
+// object down; every write pulls it fresh, patches the one key that changed,
+// and pushes the whole thing back. Just GET and PUT on a URL — no API keys,
+// no headers, no query language.
+// -----------------------------------------------------------------------------
+async function readBlob() {
+    const res = await fetch(FIREBASE_PATH);
+    if (!res.ok) {
+        throw new Error("Could not reach the shared database (HTTP " + res.status + "). " +
+            "Double-check FIREBASE_DB_URL at the top of this file, and that your " +
+            "Realtime Database rules allow read/write.");
+    }
+    const data = await res.json();
+    return data && typeof data === "object" ? data : {};
+}
+async function writeBlob(obj) {
+    const res = await fetch(FIREBASE_PATH, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(obj),
+    });
+    return res.ok;
+}
+window.storage = {
+    async get(key) {
+        const blob = await readBlob();
+        if (!(key in blob))
+            return null;
+        return { key, value: blob[key] };
+    },
+    async set(key, value) {
+        const blob = await readBlob();
+        blob[key] = value;
+        const ok = await writeBlob(blob);
+        if (!ok)
+            return null;
+        return { key, value };
+    },
+    async delete(key) {
+        const blob = await readBlob();
+        if (key in blob) {
+            delete blob[key];
+            await writeBlob(blob);
+        }
+        return { key, deleted: true };
+    },
+    async list(prefix = "") {
+        const blob = await readBlob();
+        return { keys: Object.keys(blob).filter((k) => k.startsWith(prefix)) };
+    },
+};
+// -----------------------------------------------------------------------------
+// Lightweight icon shims (emoji-based) — no icon library/CDN dependency at all.
+// Same component names the app code already uses, so nothing else changes.
+// -----------------------------------------------------------------------------
+function EmojiIcon({ glyph, size = 16, style = {} }) {
+    return (React.createElement("span", { style: { fontSize: size, lineHeight: 1, display: "inline-block", ...style } }, glyph));
+}
+const Swords = (p) => React.createElement(EmojiIcon, { glyph: "\u2694\uFE0F", ...p });
+const Shield = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDEE1\uFE0F", ...p });
+const Wand2 = (p) => React.createElement(EmojiIcon, { glyph: "\uD83E\uDE84", ...p });
+const Skull = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDC80", ...p });
+const Flame = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDD25", ...p });
+const Crown = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDC51", ...p });
+const Ghost = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDC7B", ...p });
+const Download = (p) => React.createElement(EmojiIcon, { glyph: "\u2B07\uFE0F", ...p });
+const Upload = (p) => React.createElement(EmojiIcon, { glyph: "\u2B06\uFE0F", ...p });
+const FileSpreadsheet = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDCCA", ...p });
+const LogOut = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDEAA", ...p });
+const User = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDC64", ...p });
+const ShieldCheck = (p) => React.createElement(EmojiIcon, { glyph: "\u2705", ...p });
+const RefreshCw = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDD04", ...p });
+const Save = (p) => React.createElement(EmojiIcon, { glyph: "\uD83D\uDCBE", ...p });
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+const OFFICER_PASSCODE = "IMMORTAL-ADMIN"; // internal-only gate, not real security
+const ROSTER_LIMIT = 99;
+const CLASSES = [
+    { name: "Barbarian", Icon: Swords },
+    { name: "Crusader", Icon: Shield },
+    { name: "Demon Hunter", Icon: Flame },
+    { name: "Monk", Icon: Crown },
+    { name: "Necromancer", Icon: Skull },
+    { name: "Wizard", Icon: Wand2 },
+    { name: "Tempest", Icon: Flame },
+    { name: "Warlock", Icon: Ghost },
+];
+const EVENTS = [
+    { key: "shadowWar", label: "Shadow War", Icon: Swords },
+    { key: "vigilOfBlades", label: "Vigil of Blades", Icon: Flame },
+    { key: "riteOfExile", label: "Rite of Exile", Icon: Skull },
+];
+const FIGHT_SLOTS = Array.from({ length: 8 }, (_, i) => `Fight ${i + 1}`);
+function resonanceTier(value) {
+    const v = Number(value) || 0;
+    if (v > 8000)
+        return { color: "#E5484D", label: "High (8000+)" };
+    if (v >= 5000)
+        return { color: "#E8B93F", label: "Mid (5000–7999)" };
+    return { color: "#4CAF7D", label: "Low (<5000)" };
+}
+const slugify = (s) => s.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+const fmt = (n) => (Number(n) || 0).toLocaleString();
+async function hashPassword(pw) {
+    const enc = new TextEncoder().encode(pw);
+    const buf = await crypto.subtle.digest("SHA-256", enc);
+    return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function safeGet(key) {
+    try {
+        return await window.storage.get(key, true);
+    }
+    catch {
+        return null;
+    }
+}
+const emptyStats = () => ({
+    className: "Barbarian",
+    resonance: 0,
+    combatRating: 0,
+    armor: 0,
+    armorPenetration: 0,
+    potency: 0,
+    resistance: 0,
+    shadowWar: "",
+    vigilOfBlades: "",
+    riteOfExile: "",
+    updatedAt: null,
+});
+// ---------------------------------------------------------------------------
+// Root
+// ---------------------------------------------------------------------------
+function App() {
+    const [identity, setIdentity] = useState(null); // { name, isAdmin }
+    useEffect(() => {
+        const injectFonts = () => {
+            const style = document.createElement("style");
+            style.textContent = `@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Cinzel+Decorative:wght@700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap');`;
+            document.head.appendChild(style);
+        };
+        injectFonts();
+    }, []);
+    return (React.createElement("div", { style: {
+            minHeight: "100vh",
+            background: "radial-gradient(ellipse at 50% -10%, #241512 0%, #0a0908 55%, #060605 100%)",
+            color: "#E9E2D0",
+            fontFamily: "'IBM Plex Sans', sans-serif",
+        } }, !identity ? (React.createElement(Gate, { onEnter: setIdentity })) : (React.createElement(Dashboard, { identity: identity, onLeave: () => setIdentity(null) }))));
+}
+// ---------------------------------------------------------------------------
+// Gate / login
+// ---------------------------------------------------------------------------
+function Gate({ onEnter }) {
+    const [mode, setMode] = useState("signin"); // 'signin' | 'signup'
+    const [officerMode, setOfficerMode] = useState(false);
+    const [name, setName] = useState("");
+    const [password, setPassword] = useState("");
+    const [confirmPassword, setConfirmPassword] = useState("");
+    const [passcode, setPasscode] = useState("");
+    const [error, setError] = useState("");
+    const [info, setInfo] = useState("");
+    const [loading, setLoading] = useState(false);
+    const submit = async () => {
+        setError("");
+        setInfo("");
+        if (!name.trim()) {
+            setError("Enter your character name.");
+            return;
+        }
+        const slug = slugify(name);
+        if (!slug) {
+            setError("That name isn't valid — try letters and numbers.");
+            return;
+        }
+        setLoading(true);
+        try {
+            if (officerMode) {
+                if (passcode !== OFFICER_PASSCODE) {
+                    setError("Incorrect officer passcode.");
+                    return;
+                }
+                onEnter({ name: name.trim(), isAdmin: true });
+                return;
+            }
+            if (mode === "signup") {
+                if (password.length < 4) {
+                    setError("Password must be at least 4 characters.");
+                    return;
+                }
+                if (password !== confirmPassword) {
+                    setError("Passwords don't match.");
+                    return;
+                }
+                const existing = await safeGet(`account:${slug}`);
+                if (existing) {
+                    setError("That name is already registered. Try signing in instead.");
+                    return;
+                }
+                const passwordHash = await hashPassword(password);
+                const res = await window.storage.set(`account:${slug}`, JSON.stringify({
+                    name: name.trim(),
+                    passwordHash,
+                    status: "pending",
+                    createdAt: new Date().toISOString(),
+                }), true);
+                if (!res)
+                    throw new Error("signup failed");
+                setInfo("Request submitted! An officer needs to approve your account before you can sign in.");
+                setMode("signin");
+                setPassword("");
+                setConfirmPassword("");
+                return;
+            }
+            // sign in
+            const res = await safeGet(`account:${slug}`);
+            if (!res) {
+                setError("No account found for that name — sign up first.");
+                return;
+            }
+            const account = JSON.parse(res.value);
+            if (account.status === "pending") {
+                setError("Your account is still awaiting officer approval.");
+                return;
+            }
+            if (account.status === "denied") {
+                setError("Your signup was denied. Contact an officer.");
+                return;
+            }
+            const hash = await hashPassword(password);
+            if (hash !== account.passwordHash) {
+                setError("Incorrect password.");
+                return;
+            }
+            onEnter({ name: account.name, isAdmin: false });
+        }
+        catch (e) {
+            console.error(e);
+            setError("Something went wrong — try again.");
+        }
+        finally {
+            setLoading(false);
+        }
+    };
+    return (React.createElement("div", { style: {
+            minHeight: "100vh",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "24px",
+        } },
+        React.createElement("div", { style: {
+                fontFamily: "'Cinzel Decorative', serif",
+                fontSize: "clamp(28px, 6vw, 46px)",
+                letterSpacing: "2px",
+                background: "linear-gradient(180deg, #E7C77A 0%, #B0231C 90%)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                textAlign: "center",
+                marginBottom: "6px",
+                textShadow: "0 0 40px rgba(176,35,28,0.35)",
+            } }, "Entropy.app"),
+        React.createElement("div", { style: { color: "#8A8072", fontSize: 13, letterSpacing: "3px", textTransform: "uppercase", marginBottom: 40 } }, "Resonance \u00B7 Combat Rating \u00B7 Assignments"),
+        React.createElement("div", { style: {
+                width: "100%",
+                maxWidth: 380,
+                background: "linear-gradient(180deg, #17130f 0%, #100d0a 100%)",
+                border: "1px solid #3a2a1e",
+                borderRadius: 6,
+                padding: 28,
+                boxShadow: "0 0 0 1px rgba(233,184,110,0.08), 0 20px 60px rgba(0,0,0,0.6)",
+            } },
+            !officerMode && (React.createElement("div", { style: { display: "flex", gap: 4, background: "#0d0a08", padding: 4, borderRadius: 6, border: "1px solid #2a2016", marginBottom: 20 } },
+                React.createElement("button", { onClick: () => { setMode("signin"); setError(""); setInfo(""); }, style: {
+                        flex: 1,
+                        padding: "8px 0",
+                        borderRadius: 4,
+                        border: "none",
+                        background: mode === "signin" ? "linear-gradient(180deg, #C9482F, #8E1F17)" : "transparent",
+                        color: mode === "signin" ? "#F5E9D0" : "#8A8072",
+                        fontFamily: "'Cinzel', serif",
+                        fontWeight: 600,
+                        fontSize: 13,
+                        cursor: "pointer",
+                    } }, "Sign In"),
+                React.createElement("button", { onClick: () => { setMode("signup"); setError(""); setInfo(""); }, style: {
+                        flex: 1,
+                        padding: "8px 0",
+                        borderRadius: 4,
+                        border: "none",
+                        background: mode === "signup" ? "linear-gradient(180deg, #C9482F, #8E1F17)" : "transparent",
+                        color: mode === "signup" ? "#F5E9D0" : "#8A8072",
+                        fontFamily: "'Cinzel', serif",
+                        fontWeight: 600,
+                        fontSize: 13,
+                        cursor: "pointer",
+                    } }, "Sign Up"))),
+            React.createElement("label", { style: labelStyle }, "Character Name"),
+            React.createElement("input", { value: name, onChange: (e) => setName(e.target.value), onKeyDown: (e) => e.key === "Enter" && submit(), placeholder: "e.g. Xylara", style: inputStyle, autoFocus: true }),
+            !officerMode && (React.createElement("div", { style: { marginTop: 14 } },
+                React.createElement("label", { style: labelStyle }, "Password"),
+                React.createElement("input", { type: "password", value: password, onChange: (e) => setPassword(e.target.value), onKeyDown: (e) => e.key === "Enter" && mode === "signin" && submit(), placeholder: "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022", style: inputStyle }))),
+            !officerMode && mode === "signup" && (React.createElement("div", { style: { marginTop: 14 } },
+                React.createElement("label", { style: labelStyle }, "Confirm Password"),
+                React.createElement("input", { type: "password", value: confirmPassword, onChange: (e) => setConfirmPassword(e.target.value), onKeyDown: (e) => e.key === "Enter" && submit(), placeholder: "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022", style: inputStyle }))),
+            React.createElement("div", { onClick: () => { setOfficerMode((v) => !v); setError(""); setInfo(""); }, style: {
+                    marginTop: 18,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    cursor: "pointer",
+                    userSelect: "none",
+                } },
+                React.createElement("div", { style: {
+                        width: 18,
+                        height: 18,
+                        border: "1px solid #6b5a44",
+                        borderRadius: 3,
+                        background: officerMode ? "#B0231C" : "transparent",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                    } }, officerMode && React.createElement(ShieldCheck, { size: 13, color: "#0a0908" })),
+                React.createElement("span", { style: { fontSize: 13.5, color: "#C9BEA8" } }, "I'm an officer (admin access)")),
+            officerMode && (React.createElement("div", { style: { marginTop: 12 } },
+                React.createElement("label", { style: labelStyle }, "Officer Passcode"),
+                React.createElement("input", { type: "password", value: passcode, onChange: (e) => setPasscode(e.target.value), onKeyDown: (e) => e.key === "Enter" && submit(), style: inputStyle, placeholder: "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022" }))),
+            error && (React.createElement("div", { style: { color: "#E37C6E", fontSize: 12.5, marginTop: 12 } }, error)),
+            info && (React.createElement("div", { style: { color: "#8FCB9E", fontSize: 12.5, marginTop: 12 } }, info)),
+            React.createElement("button", { onClick: submit, disabled: loading, style: { ...primaryBtnStyle, opacity: loading ? 0.6 : 1, cursor: loading ? "default" : "pointer" } }, loading
+                ? "Please wait…"
+                : officerMode
+                    ? "Enter as Officer"
+                    : mode === "signup"
+                        ? "Request Access"
+                        : "Enter the Board"),
+            !officerMode && (React.createElement("div", { style: { fontSize: 11.5, color: "#6b6252", marginTop: 12, textAlign: "center" } }, mode === "signup"
+                ? "New accounts need officer approval before signing in."
+                : "New here? Switch to Sign Up above.")))));
+}
+const labelStyle = {
+    display: "block",
+    fontSize: 11,
+    letterSpacing: "1.5px",
+    textTransform: "uppercase",
+    color: "#8A8072",
+    marginBottom: 6,
+};
+const inputStyle = {
+    width: "100%",
+    boxSizing: "border-box",
+    background: "#0d0a08",
+    border: "1px solid #3a2a1e",
+    borderRadius: 4,
+    padding: "10px 12px",
+    color: "#E9E2D0",
+    fontSize: 14,
+    outline: "none",
+    fontFamily: "'IBM Plex Sans', sans-serif",
+};
+const primaryBtnStyle = {
+    width: "100%",
+    marginTop: 22,
+    padding: "12px 0",
+    background: "linear-gradient(180deg, #C9482F 0%, #8E1F17 100%)",
+    border: "1px solid #E7C77A55",
+    borderRadius: 4,
+    color: "#F5E9D0",
+    fontFamily: "'Cinzel', serif",
+    fontWeight: 700,
+    letterSpacing: "1px",
+    fontSize: 14,
+    cursor: "pointer",
+};
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+function Dashboard({ identity, onLeave }) {
+    const [tab, setTab] = useState("mine"); // 'mine' | 'roster'
+    const [members, setMembers] = useState({}); // slug -> stats
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [toast, setToast] = useState("");
+    const mySlug = slugify(identity.name);
+    const loadRoster = useCallback(async () => {
+        setLoading(true);
+        try {
+            const listing = await window.storage.list("member:", true);
+            const keys = (listing === null || listing === void 0 ? void 0 : listing.keys) || [];
+            const entries = await Promise.all(keys.map(async (k) => {
+                try {
+                    const r = await window.storage.get(k, true);
+                    return [k.replace(/^member:/, ""), r ? JSON.parse(r.value) : null];
+                }
+                catch {
+                    return [k.replace(/^member:/, ""), null];
+                }
+            }));
+            const map = {};
+            entries.forEach(([slug, val]) => {
+                if (val)
+                    map[slug] = val;
+            });
+            setMembers(map);
+        }
+        catch (e) {
+            console.error("Failed to load roster", e);
+        }
+        finally {
+            setLoading(false);
+        }
+    }, []);
+    useEffect(() => {
+        loadRoster();
+    }, [loadRoster]);
+    const showToast = (msg) => {
+        setToast(msg);
+        setTimeout(() => setToast(""), 2200);
+    };
+    const saveMember = async (slug, stats) => {
+        setSaving(true);
+        try {
+            const payload = { ...stats, updatedAt: new Date().toISOString() };
+            const res = await window.storage.set(`member:${slug}`, JSON.stringify(payload), true);
+            if (!res)
+                throw new Error("no result");
+            setMembers((prev) => ({ ...prev, [slug]: payload }));
+            showToast("Saved.");
+        }
+        catch (e) {
+            console.error(e);
+            showToast("Save failed — try again.");
+        }
+        finally {
+            setSaving(false);
+        }
+    };
+    const myStats = members[mySlug] || { ...emptyStats(), name: identity.name };
+    return (React.createElement("div", { style: { maxWidth: 980, margin: "0 auto", padding: "20px 20px 60px" } },
+        React.createElement(TopBar, { identity: identity, onLeave: onLeave, tab: tab, setTab: setTab, onRefresh: loadRoster }),
+        loading ? (React.createElement("div", { style: { textAlign: "center", padding: 60, color: "#8A8072" } },
+            React.createElement(RefreshCw, { size: 18, className: "spin", style: { marginBottom: 10 } }),
+            React.createElement("div", null, "Loading the rift board\u2026"))) : tab === "mine" ? (React.createElement(MyStatsPanel, { name: identity.name, slug: mySlug, stats: myStats, onSave: (s) => saveMember(mySlug, { ...s, name: identity.name }), saving: saving, isAdmin: identity.isAdmin })) : tab === "roster" ? (React.createElement(RosterPanel, { members: members, isAdmin: identity.isAdmin, onSaveAssignment: saveMember })) : tab === "approvals" ? (React.createElement(ApprovalsPanel, null)) : (React.createElement(EventPanel, { eventDef: EVENTS.find((e) => e.key === tab), members: members, isAdmin: identity.isAdmin, mySlug: mySlug, onSaveAssignment: saveMember })),
+        toast && (React.createElement("div", { style: {
+                position: "fixed",
+                bottom: 24,
+                left: "50%",
+                transform: "translateX(-50%)",
+                background: "#1c1712",
+                border: "1px solid #E7C77A55",
+                color: "#E9E2D0",
+                padding: "10px 18px",
+                borderRadius: 6,
+                fontSize: 13.5,
+            } }, toast))));
+}
+function TopBar({ identity, onLeave, tab, setTab, onRefresh }) {
+    return (React.createElement("div", { style: {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 12,
+            padding: "18px 4px 22px",
+            borderBottom: "1px solid #2a2016",
+            marginBottom: 24,
+        } },
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14 } },
+            React.createElement("div", { style: { fontFamily: "'Cinzel Decorative', serif", fontSize: 22, color: "#E7C77A" } }, "Entropy.app"),
+            React.createElement("div", { style: { display: "flex", gap: 4, background: "#100d0a", padding: 4, borderRadius: 6, border: "1px solid #2a2016", flexWrap: "wrap" } },
+                React.createElement(TabBtn, { active: tab === "mine", onClick: () => setTab("mine") }, "My Stats"),
+                React.createElement(TabBtn, { active: tab === "roster", onClick: () => setTab("roster") }, "Clan Roster"),
+                EVENTS.map((ev) => (React.createElement(TabBtn, { key: ev.key, active: tab === ev.key, onClick: () => setTab(ev.key) }, ev.label))),
+                identity.isAdmin && (React.createElement(TabBtn, { active: tab === "approvals", onClick: () => setTab("approvals") }, "Approvals")))),
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14 } },
+            React.createElement("button", { onClick: onRefresh, title: "Refresh", style: iconBtnStyle },
+                React.createElement(RefreshCw, { size: 15 })),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#C9BEA8" } },
+                React.createElement(User, { size: 14 }),
+                identity.name,
+                identity.isAdmin && (React.createElement("span", { style: { background: "#B0231C33", color: "#E7A88A", padding: "2px 7px", borderRadius: 4, fontSize: 10.5, letterSpacing: "1px", textTransform: "uppercase" } }, "Officer"))),
+            React.createElement("button", { onClick: onLeave, style: iconBtnStyle, title: "Leave" },
+                React.createElement(LogOut, { size: 15 })))));
+}
+function TabBtn({ active, onClick, children }) {
+    return (React.createElement("button", { onClick: onClick, style: {
+            padding: "7px 16px",
+            borderRadius: 4,
+            border: "none",
+            background: active ? "linear-gradient(180deg, #C9482F, #8E1F17)" : "transparent",
+            color: active ? "#F5E9D0" : "#8A8072",
+            fontFamily: "'Cinzel', serif",
+            fontWeight: 600,
+            fontSize: 13,
+            cursor: "pointer",
+            letterSpacing: "0.5px",
+        } }, children));
+}
+const iconBtnStyle = {
+    background: "#100d0a",
+    border: "1px solid #2a2016",
+    borderRadius: 5,
+    padding: 8,
+    color: "#C9BEA8",
+    cursor: "pointer",
+    display: "flex",
+};
+const ghostBtnStyle = {
+    background: "transparent",
+    border: "1px solid #3a2a1e",
+    borderRadius: 5,
+    padding: "9px 14px",
+    color: "#C9BEA8",
+    fontSize: 13,
+    fontFamily: "'IBM Plex Sans', sans-serif",
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+};
+// ---------------------------------------------------------------------------
+// My Stats panel
+// ---------------------------------------------------------------------------
+const STAT_FIELDS = [
+    { key: "resonance", label: "Resonance", max: 320000 },
+    { key: "combatRating", label: "Combat Rating", max: 6000000 },
+];
+const SECONDARY_FIELDS = [
+    { key: "armor", label: "Armor" },
+    { key: "armorPenetration", label: "Armor Penetration" },
+    { key: "potency", label: "Potency" },
+    { key: "resistance", label: "Resistance" },
+];
+function MyStatsPanel({ name, stats, onSave, saving, isAdmin }) {
+    const [form, setForm] = useState(stats);
+    const [dirty, setDirty] = useState(false);
+    useEffect(() => {
+        setForm(stats);
+        setDirty(false);
+        // eslint-disable-next-line
+    }, [stats.updatedAt]);
+    const update = (key, value) => {
+        setForm((f) => ({ ...f, [key]: value }));
+        setDirty(true);
+    };
+    return (React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 20 } },
+        React.createElement("div", { style: cardStyle },
+            React.createElement(SectionLabel, null, "Character"),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14, marginBottom: 18 } },
+                React.createElement(ClassIcon, { className: form.className, size: 30 }),
+                React.createElement("div", null,
+                    React.createElement("div", { style: { fontFamily: "'Cinzel', serif", fontSize: 18, color: "#E9E2D0" } }, name),
+                    React.createElement("select", { value: form.className, onChange: (e) => update("className", e.target.value), style: { ...inputStyle, marginTop: 6, width: 180, padding: "6px 8px", fontSize: 12.5 } }, CLASSES.map((c) => (React.createElement("option", { key: c.name, value: c.name }, c.name)))))),
+            STAT_FIELDS.map((f) => (React.createElement(StatInput, { key: f.key, field: f, value: form[f.key], onChange: (v) => update(f.key, v) }))),
+            React.createElement(SectionLabel, { style: { marginTop: 20 } }, "My Event Assignments"),
+            React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, EVENTS.map((ev) => (React.createElement("div", { key: ev.key, style: {
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    background: "#100d0a",
+                    border: "1px solid #2a2016",
+                    borderRadius: 5,
+                    padding: "9px 12px",
+                } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, color: "#8A8072", fontSize: 12.5 } },
+                    React.createElement(ev.Icon, { size: 13 }),
+                    " ",
+                    ev.label),
+                React.createElement("div", { style: { fontSize: 13, color: form[ev.key] ? "#E9E2D0" : "#4a4436", textAlign: "right" } }, form[ev.key] || "Unassigned"))))),
+            React.createElement("div", { style: { fontSize: 11.5, color: "#6b6252", marginTop: 8 } }, "Officers set these from each event's tab."),
+            React.createElement("button", { onClick: () => onSave(form), disabled: !dirty || saving, style: {
+                    ...primaryBtnStyle,
+                    marginTop: 22,
+                    opacity: !dirty || saving ? 0.5 : 1,
+                    cursor: !dirty || saving ? "default" : "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 8,
+                } },
+                React.createElement(Save, { size: 14 }),
+                " ",
+                saving ? "Saving…" : "Save My Stats")),
+        React.createElement("div", { style: cardStyle },
+            React.createElement(SectionLabel, null, "Secondary Stats"),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginTop: 6 } }, SECONDARY_FIELDS.map((f) => (React.createElement("div", { key: f.key },
+                React.createElement("label", { style: labelStyle }, f.label),
+                React.createElement("input", { type: "number", value: form[f.key], onChange: (e) => update(f.key, Number(e.target.value)), style: inputStyle }))))),
+            form.updatedAt && (React.createElement("div", { style: { fontSize: 11, color: "#6b6252", marginTop: 18 } },
+                "Last updated ",
+                new Date(form.updatedAt).toLocaleString())))));
+}
+function StatInput({ field, value, onChange }) {
+    const pct = Math.min(100, ((Number(value) || 0) / field.max) * 100);
+    return (React.createElement("div", { style: { marginBottom: 16 } },
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 } },
+            React.createElement("label", { style: { ...labelStyle, marginBottom: 0 } }, field.label),
+            React.createElement("span", { style: { fontFamily: "'JetBrains Mono', monospace", fontSize: 12.5, color: "#E7C77A" } }, fmt(value))),
+        React.createElement("input", { type: "number", value: value, onChange: (e) => onChange(Number(e.target.value)), style: inputStyle }),
+        React.createElement("div", { style: { height: 5, background: "#100d0a", borderRadius: 3, marginTop: 8, overflow: "hidden", border: "1px solid #2a2016" } },
+            React.createElement("div", { style: {
+                    height: "100%",
+                    width: `${pct}%`,
+                    background: "linear-gradient(90deg, #8E1F17, #E7C77A)",
+                    transition: "width 0.3s",
+                } }))));
+}
+function SectionLabel({ children, style }) {
+    return (React.createElement("div", { style: {
+            fontFamily: "'Cinzel', serif",
+            fontSize: 12.5,
+            letterSpacing: "1.5px",
+            textTransform: "uppercase",
+            color: "#B0231C",
+            marginBottom: 12,
+            ...style,
+        } }, children));
+}
+const cardStyle = {
+    background: "linear-gradient(180deg, #15110d 0%, #0f0c09 100%)",
+    border: "1px solid #2a2016",
+    borderRadius: 6,
+    padding: 22,
+};
+function LegendDot({ color, label }) {
+    return (React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 5 } },
+        React.createElement("span", { style: { width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block" } }),
+        label));
+}
+function ClassIcon({ className, size = 18 }) {
+    const found = CLASSES.find((c) => c.name === className) || CLASSES[0];
+    const Icon = found.Icon;
+    return (React.createElement("div", { style: {
+            width: size + 16,
+            height: size + 16,
+            borderRadius: 6,
+            background: "#1c1712",
+            border: "1px solid #E7C77A44",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#E7C77A",
+            flexShrink: 0,
+        } },
+        React.createElement(Icon, { size: size })));
+}
+// ---------------------------------------------------------------------------
+// Roster panel
+// ---------------------------------------------------------------------------
+function normalizeRow(row) {
+    var _a;
+    const map = {};
+    Object.keys(row).forEach((k) => {
+        map[k.trim().toLowerCase()] = row[k];
+    });
+    const pick = (...keys) => {
+        for (const k of keys) {
+            if (map[k] !== undefined && String(map[k]).trim() !== "")
+                return map[k];
+        }
+        return undefined;
+    };
+    const num = (v) => (v === undefined ? undefined : Number(v) || 0);
+    const classRaw = pick("class", "character class");
+    const className = classRaw
+        ? (_a = CLASSES.find((c) => c.name.toLowerCase() === String(classRaw).trim().toLowerCase())) === null || _a === void 0 ? void 0 : _a.name
+        : undefined;
+    const name = pick("name", "character name", "member", "member name");
+    return {
+        name: name ? String(name).trim() : undefined,
+        className,
+        resonance: num(pick("resonance")),
+        combatRating: num(pick("combat rating", "cr")),
+        armor: num(pick("armor")),
+        armorPenetration: num(pick("armor penetration", "armor pen")),
+        potency: num(pick("potency")),
+        resistance: num(pick("resistance")),
+        shadowWar: pick("shadow war"),
+        vigilOfBlades: pick("vigil of blades"),
+        riteOfExile: pick("rite of exile"),
+    };
+}
+const TEMPLATE_HEADERS = [
+    "Name",
+    "Class",
+    "Resonance",
+    "Combat Rating",
+    "Armor",
+    "Armor Penetration",
+    "Potency",
+    "Resistance",
+    "Shadow War",
+    "Vigil of Blades",
+    "Rite of Exile",
+];
+function RosterPanel({ members, isAdmin, onSaveAssignment }) {
+    const [exporting, setExporting] = useState(false);
+    const [importing, setImporting] = useState(false);
+    const [importMsg, setImportMsg] = useState("");
+    const fileInputRef = useRef(null);
+    const rows = useMemo(() => Object.entries(members)
+        .map(([slug, m]) => ({ slug, ...m }))
+        .sort((a, b) => (b.combatRating || 0) - (a.combatRating || 0)), [members]);
+    const downloadTemplate = async () => {
+        try {
+            const XLSX = window.XLSX;
+            const blankRows = Array.from({ length: ROSTER_LIMIT }, () => Object.fromEntries(TEMPLATE_HEADERS.map((h) => [h, ""])));
+            const ws = XLSX.utils.json_to_sheet(blankRows, { header: TEMPLATE_HEADERS });
+            ws["!cols"] = TEMPLATE_HEADERS.map((h) => ({ wch: Math.max(h.length + 2, 16) }));
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Roster Template");
+            const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+            const blob = new Blob([wbout], { type: "application/octet-stream" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "entropy-roster-template.xlsx";
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        }
+        catch (e) {
+            console.error("Template download failed", e);
+        }
+    };
+    const importRoster = async (parsedRows) => {
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j;
+        const limited = parsedRows.slice(0, ROSTER_LIMIT);
+        let count = 0;
+        for (const raw of limited) {
+            const norm = normalizeRow(raw);
+            if (!norm.name)
+                continue;
+            const slug = slugify(norm.name);
+            const existing = members[slug] || emptyStats();
+            const merged = {
+                ...existing,
+                name: norm.name,
+                className: norm.className || existing.className,
+                resonance: (_a = norm.resonance) !== null && _a !== void 0 ? _a : existing.resonance,
+                combatRating: (_b = norm.combatRating) !== null && _b !== void 0 ? _b : existing.combatRating,
+                armor: (_c = norm.armor) !== null && _c !== void 0 ? _c : existing.armor,
+                armorPenetration: (_d = norm.armorPenetration) !== null && _d !== void 0 ? _d : existing.armorPenetration,
+                potency: (_e = norm.potency) !== null && _e !== void 0 ? _e : existing.potency,
+                resistance: (_f = norm.resistance) !== null && _f !== void 0 ? _f : existing.resistance,
+                shadowWar: (_g = norm.shadowWar) !== null && _g !== void 0 ? _g : existing.shadowWar,
+                vigilOfBlades: (_h = norm.vigilOfBlades) !== null && _h !== void 0 ? _h : existing.vigilOfBlades,
+                riteOfExile: (_j = norm.riteOfExile) !== null && _j !== void 0 ? _j : existing.riteOfExile,
+            };
+            await onSaveAssignment(slug, merged);
+            count += 1;
+        }
+        return count;
+    };
+    const handleFileChange = async (e) => {
+        var _a;
+        const file = (_a = e.target.files) === null || _a === void 0 ? void 0 : _a[0];
+        if (!file)
+            return;
+        setImporting(true);
+        setImportMsg("");
+        try {
+            const XLSX = window.XLSX;
+            const buf = await file.arrayBuffer();
+            const wb = XLSX.read(buf, { type: "array" });
+            const sheet = wb.Sheets[wb.SheetNames[0]];
+            const parsedRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+            const overCap = parsedRows.length > ROSTER_LIMIT;
+            const count = await importRoster(parsedRows);
+            setImportMsg(`Imported ${count} member${count === 1 ? "" : "s"}.` +
+                (overCap ? ` Sheet had ${parsedRows.length} rows — capped at ${ROSTER_LIMIT}.` : ""));
+        }
+        catch (err) {
+            console.error("Import failed", err);
+            setImportMsg("Import failed — check the file matches the template format.");
+        }
+        finally {
+            setImporting(false);
+            if (fileInputRef.current)
+                fileInputRef.current.value = "";
+        }
+    };
+    const exportExcel = async () => {
+        setExporting(true);
+        try {
+            const XLSX = window.XLSX;
+            const data = rows.map((m) => ({
+                Name: m.name,
+                Class: m.className,
+                Resonance: m.resonance || 0,
+                "Combat Rating": m.combatRating || 0,
+                Armor: m.armor || 0,
+                "Armor Penetration": m.armorPenetration || 0,
+                Potency: m.potency || 0,
+                Resistance: m.resistance || 0,
+                "Shadow War": m.shadowWar || "",
+                "Vigil of Blades": m.vigilOfBlades || "",
+                "Rite of Exile": m.riteOfExile || "",
+                "Last Updated": m.updatedAt ? new Date(m.updatedAt).toLocaleString() : "",
+            }));
+            const ws = XLSX.utils.json_to_sheet(data);
+            ws["!cols"] = Object.keys(data[0] || {}).map((k) => ({ wch: Math.max(k.length + 2, 14) }));
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Clan Roster");
+            const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+            const blob = new Blob([wbout], { type: "application/octet-stream" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = `clan-roster-${new Date().toISOString().slice(0, 10)}.xlsx`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+        }
+        catch (e) {
+            console.error("Export failed", e);
+        }
+        finally {
+            setExporting(false);
+        }
+    };
+    return (React.createElement("div", null,
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 10 } },
+            React.createElement("div", { style: { fontSize: 12.5, color: "#8A8072", letterSpacing: "0.5px" } },
+                React.createElement("span", { style: { fontFamily: "'JetBrains Mono', monospace", color: "#E7C77A" } }, rows.length),
+                " / ",
+                ROSTER_LIMIT,
+                " clan spots filled"),
+            isAdmin && (React.createElement("div", { style: { display: "flex", gap: 10, flexWrap: "wrap" } },
+                React.createElement("input", { type: "file", accept: ".xlsx,.xls", ref: fileInputRef, onChange: handleFileChange, style: { display: "none" } }),
+                React.createElement("button", { onClick: downloadTemplate, style: { ...ghostBtnStyle } },
+                    React.createElement(FileSpreadsheet, { size: 14 }),
+                    " Download Template"),
+                React.createElement("button", { onClick: () => { var _a; return (_a = fileInputRef.current) === null || _a === void 0 ? void 0 : _a.click(); }, disabled: importing, style: { ...ghostBtnStyle, opacity: importing ? 0.6 : 1 } },
+                    React.createElement(Upload, { size: 14 }),
+                    " ",
+                    importing ? "Importing…" : "Upload Roster"),
+                React.createElement("button", { onClick: exportExcel, disabled: exporting || rows.length === 0, style: {
+                        ...primaryBtnStyle,
+                        width: "auto",
+                        marginTop: 0,
+                        padding: "9px 18px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        fontSize: 13,
+                        opacity: rows.length === 0 ? 0.5 : 1,
+                    } },
+                    React.createElement(Download, { size: 14 }),
+                    " ",
+                    exporting ? "Exporting…" : "Export to Excel")))),
+        importMsg && (React.createElement("div", { style: { fontSize: 12.5, color: "#C9BEA8", marginBottom: 14, background: "#100d0a", border: "1px solid #2a2016", borderRadius: 5, padding: "8px 12px" } }, importMsg)),
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14, marginBottom: 12, fontSize: 11.5, color: "#8A8072" } },
+            React.createElement("span", null, "Resonance:"),
+            React.createElement(LegendDot, { color: "#E5484D", label: "Above 8000" }),
+            React.createElement(LegendDot, { color: "#E8B93F", label: "5000\u20137999" }),
+            React.createElement(LegendDot, { color: "#4CAF7D", label: "Below 5000" })),
+        rows.length === 0 ? (React.createElement("div", { style: { ...cardStyle, textAlign: "center", padding: 50, color: "#8A8072" } }, "No clan members have posted their stats yet. Head to \"My Stats\" to be the first, or upload a roster file above.")) : (React.createElement("div", { style: { ...cardStyle, padding: 0, overflow: "hidden" } },
+            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: 13 } },
+                React.createElement("thead", null,
+                    React.createElement("tr", { style: { background: "#100d0a", borderBottom: "1px solid #2a2016" } }, ["Member", "Resonance", "Combat Rating", "Events"].map((h) => (React.createElement("th", { key: h, style: { textAlign: "left", padding: "12px 16px", color: "#8A8072", fontWeight: 600, letterSpacing: "0.5px", fontSize: 11.5, textTransform: "uppercase" } }, h))))),
+                React.createElement("tbody", null, rows.map((m) => (React.createElement("tr", { key: m.slug, style: { borderBottom: "1px solid #201a13" } },
+                    React.createElement("td", { style: { padding: "12px 16px" } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                            React.createElement(ClassIcon, { className: m.className, size: 15 }),
+                            React.createElement("div", null,
+                                React.createElement("div", { style: { color: "#E9E2D0", fontWeight: 500 } }, m.name),
+                                React.createElement("div", { style: { color: "#6b6252", fontSize: 11 } }, m.className)))),
+                    React.createElement("td", { style: { padding: "12px 16px", fontFamily: "'JetBrains Mono', monospace", color: resonanceTier(m.resonance).color } }, fmt(m.resonance)),
+                    React.createElement("td", { style: { padding: "12px 16px", fontFamily: "'JetBrains Mono', monospace", color: "#E7C77A" } }, fmt(m.combatRating)),
+                    React.createElement("td", { style: { padding: "12px 16px" } },
+                        React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } }, EVENTS.map((ev) => {
+                            const filled = Boolean(m[ev.key]);
+                            return (React.createElement("span", { key: ev.key, title: filled ? `${ev.label}: ${m[ev.key]}` : `${ev.label}: unassigned`, style: {
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 4,
+                                    fontSize: 10.5,
+                                    padding: "3px 7px",
+                                    borderRadius: 4,
+                                    border: `1px solid ${filled ? "#E7C77A55" : "#2a2016"}`,
+                                    color: filled ? "#E7C77A" : "#4a4436",
+                                    background: filled ? "#E7C77A14" : "transparent",
+                                } },
+                                React.createElement(ev.Icon, { size: 10 }),
+                                " ",
+                                ev.label.split(" ")[0]));
+                        }))))))))))));
+}
+// ---------------------------------------------------------------------------
+// Event panel (Shadow War / Vigil of Blades / Rite of Exile)
+// ---------------------------------------------------------------------------
+function EventPanel({ eventDef, members, isAdmin, mySlug, onSaveAssignment }) {
+    const [dragSlug, setDragSlug] = useState(null);
+    const [dragOverZone, setDragOverZone] = useState(null);
+    const rows = useMemo(() => Object.entries(members)
+        .map(([slug, m]) => ({ slug, ...m }))
+        .sort((a, b) => (b.resonance || 0) - (a.resonance || 0)), [members]);
+    const assignedCount = rows.filter((r) => r[eventDef.key]).length;
+    const assignSlug = async (slug, fightLabel) => {
+        const m = members[slug];
+        if (!m)
+            return;
+        await onSaveAssignment(slug, { ...m, [eventDef.key]: fightLabel });
+    };
+    const handleDrop = (e, fightLabel) => {
+        e.preventDefault();
+        const slug = e.dataTransfer.getData("text/plain") || dragSlug;
+        if (slug)
+            assignSlug(slug, fightLabel);
+        setDragOverZone(null);
+        setDragSlug(null);
+    };
+    const dragCardProps = (slug) => ({
+        draggable: true,
+        onDragStart: (e) => {
+            e.dataTransfer.setData("text/plain", slug);
+            setDragSlug(slug);
+        },
+        onDragEnd: () => setDragSlug(null),
+    });
+    const header = (React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" } },
+        React.createElement(eventDef.Icon, { size: 20, color: "#E7C77A" }),
+        React.createElement("div", { style: { fontFamily: "'Cinzel Decorative', serif", fontSize: 20, color: "#E7C77A" } }, eventDef.label),
+        React.createElement("div", { style: { fontSize: 12.5, color: "#8A8072", marginLeft: "auto" } },
+            React.createElement("span", { style: { fontFamily: "'JetBrains Mono', monospace", color: "#E7C77A" } }, assignedCount),
+            " / ",
+            rows.length,
+            " assigned")));
+    // -------------------------------------------------------------------------
+    // Non-admin: see only your own assignment
+    // -------------------------------------------------------------------------
+    if (!isAdmin) {
+        const mine = members[mySlug];
+        const assignment = mine === null || mine === void 0 ? void 0 : mine[eventDef.key];
+        return (React.createElement("div", null,
+            header,
+            React.createElement("div", { style: { ...cardStyle, textAlign: "center", padding: "48px 24px" } },
+                React.createElement("div", { style: { fontSize: 11, letterSpacing: "2px", textTransform: "uppercase", color: "#8A8072", marginBottom: 12 } }, "Your Assignment"),
+                assignment ? (React.createElement("div", { style: { fontFamily: "'Cinzel', serif", fontSize: 30, color: "#E7C77A" } }, assignment)) : (React.createElement("div", { style: { fontSize: 14.5, color: "#6b6252" } },
+                    "You haven't been assigned yet. Check back closer to ",
+                    eventDef.label,
+                    ".")))));
+    }
+    // -------------------------------------------------------------------------
+    // Admin: drag-and-drop roster onto fight slots
+    // -------------------------------------------------------------------------
+    return (React.createElement("div", null,
+        header,
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14, marginBottom: 14, fontSize: 11.5, color: "#8A8072" } },
+            React.createElement("span", null, "Drag a member card onto a fight slot. Resonance:"),
+            React.createElement(LegendDot, { color: "#E5484D", label: "Above 8000" }),
+            React.createElement(LegendDot, { color: "#E8B93F", label: "5000\u20137999" }),
+            React.createElement(LegendDot, { color: "#4CAF7D", label: "Below 5000" })),
+        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "240px 1fr", gap: 16, alignItems: "start" } },
+            React.createElement("div", { onDragOver: (e) => {
+                    e.preventDefault();
+                    setDragOverZone("__pool__");
+                }, onDragLeave: () => setDragOverZone(null), onDrop: (e) => handleDrop(e, ""), style: {
+                    ...cardStyle,
+                    padding: 12,
+                    minHeight: 200,
+                    border: dragOverZone === "__pool__" ? "1px solid #E7C77A88" : cardStyle.border,
+                } },
+                React.createElement("div", { style: { fontSize: 11, letterSpacing: "1.5px", textTransform: "uppercase", color: "#8A8072", marginBottom: 10 } },
+                    "Roster (",
+                    rows.length,
+                    ")"),
+                React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, maxHeight: 560, overflowY: "auto" } },
+                    rows.map((m) => {
+                        const tier = resonanceTier(m.resonance);
+                        return (React.createElement("div", { key: m.slug, ...dragCardProps(m.slug), style: {
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                padding: "7px 9px",
+                                borderRadius: 5,
+                                background: "#100d0a",
+                                border: `1px solid ${tier.color}66`,
+                                cursor: "grab",
+                                opacity: dragSlug === m.slug ? 0.4 : 1,
+                            } },
+                            React.createElement(ClassIcon, { className: m.className, size: 12 }),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 12.5, color: "#E9E2D0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, m.name),
+                                React.createElement("div", { style: { fontSize: 10.5, color: tier.color } },
+                                    fmt(m.resonance),
+                                    " res.")),
+                            m[eventDef.key] && (React.createElement("span", { style: { fontSize: 9.5, color: "#8A8072", whiteSpace: "nowrap" } }, m[eventDef.key]))));
+                    }),
+                    rows.length === 0 && (React.createElement("div", { style: { fontSize: 12, color: "#4a4436" } }, "No members yet.")))),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 12 } }, FIGHT_SLOTS.map((slot) => {
+                const assigned = rows.filter((r) => r[eventDef.key] === slot);
+                return (React.createElement("div", { key: slot, onDragOver: (e) => {
+                        e.preventDefault();
+                        setDragOverZone(slot);
+                    }, onDragLeave: () => setDragOverZone(null), onDrop: (e) => handleDrop(e, slot), style: {
+                        ...cardStyle,
+                        padding: 10,
+                        minHeight: 130,
+                        border: dragOverZone === slot ? "1px solid #E7C77A88" : cardStyle.border,
+                    } },
+                    React.createElement("div", { style: { fontFamily: "'Cinzel', serif", fontSize: 12.5, color: "#E7C77A", marginBottom: 8 } },
+                        slot,
+                        " ",
+                        React.createElement("span", { style: { color: "#6b6252", fontWeight: 400 } },
+                            "(",
+                            assigned.length,
+                            ")")),
+                    React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 5 } },
+                        assigned.map((m) => {
+                            const tier = resonanceTier(m.resonance);
+                            return (React.createElement("div", { key: m.slug, ...dragCardProps(m.slug), style: {
+                                    fontSize: 11.5,
+                                    padding: "5px 7px",
+                                    borderRadius: 4,
+                                    background: "#0d0a08",
+                                    border: `1px solid ${tier.color}66`,
+                                    color: "#E9E2D0",
+                                    cursor: "grab",
+                                    opacity: dragSlug === m.slug ? 0.4 : 1,
+                                } }, m.name));
+                        }),
+                        assigned.length === 0 && (React.createElement("div", { style: { fontSize: 11, color: "#4a4436" } }, "Drop here")))));
+            })))));
+}
+// ---------------------------------------------------------------------------
+// Approvals panel (admin-only: approve/deny member signups)
+// ---------------------------------------------------------------------------
+function ApprovalsPanel() {
+    const [accounts, setAccounts] = useState({});
+    const [loading, setLoading] = useState(true);
+    const [actingSlug, setActingSlug] = useState(null);
+    const loadAccounts = useCallback(async () => {
+        setLoading(true);
+        try {
+            const listing = await window.storage.list("account:", true);
+            const keys = (listing === null || listing === void 0 ? void 0 : listing.keys) || [];
+            const entries = await Promise.all(keys.map(async (k) => {
+                const r = await safeGet(k);
+                return [k.replace(/^account:/, ""), r ? JSON.parse(r.value) : null];
+            }));
+            const map = {};
+            entries.forEach(([slug, val]) => {
+                if (val)
+                    map[slug] = val;
+            });
+            setAccounts(map);
+        }
+        catch (e) {
+            console.error("Failed to load accounts", e);
+        }
+        finally {
+            setLoading(false);
+        }
+    }, []);
+    useEffect(() => {
+        loadAccounts();
+    }, [loadAccounts]);
+    const setStatus = async (slug, status) => {
+        setActingSlug(slug);
+        try {
+            const account = accounts[slug];
+            const updated = { ...account, status, decidedAt: new Date().toISOString() };
+            const res = await window.storage.set(`account:${slug}`, JSON.stringify(updated), true);
+            if (!res)
+                throw new Error("update failed");
+            setAccounts((prev) => ({ ...prev, [slug]: updated }));
+        }
+        catch (e) {
+            console.error(e);
+        }
+        finally {
+            setActingSlug(null);
+        }
+    };
+    const rows = Object.entries(accounts).map(([slug, a]) => ({ slug, ...a }));
+    const pending = rows.filter((a) => a.status === "pending").sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    const approved = rows.filter((a) => a.status === "approved");
+    const denied = rows.filter((a) => a.status === "denied");
+    if (loading) {
+        return (React.createElement("div", { style: { textAlign: "center", padding: 60, color: "#8A8072" } },
+            React.createElement(RefreshCw, { size: 18, style: { marginBottom: 10 } }),
+            React.createElement("div", null, "Loading account requests\u2026")));
+    }
+    return (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 22 } },
+        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } },
+            React.createElement("div", { style: { fontFamily: "'Cinzel Decorative', serif", fontSize: 20, color: "#E7C77A" } }, "Account Approvals"),
+            React.createElement("button", { onClick: loadAccounts, style: iconBtnStyle, title: "Refresh" },
+                React.createElement(RefreshCw, { size: 15 }))),
+        React.createElement("div", null,
+            React.createElement(SectionLabel, null,
+                "Pending Requests (",
+                pending.length,
+                ")"),
+            pending.length === 0 ? (React.createElement("div", { style: { ...cardStyle, padding: 20, color: "#6b6252", fontSize: 13 } }, "No signups waiting on approval.")) : (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, pending.map((a) => (React.createElement("div", { key: a.slug, style: { ...cardStyle, padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 } },
+                React.createElement("div", null,
+                    React.createElement("div", { style: { color: "#E9E2D0", fontWeight: 500, fontSize: 14 } }, a.name),
+                    React.createElement("div", { style: { color: "#6b6252", fontSize: 11 } },
+                        "Requested ",
+                        a.createdAt ? new Date(a.createdAt).toLocaleString() : "—")),
+                React.createElement("div", { style: { display: "flex", gap: 8 } },
+                    React.createElement("button", { onClick: () => setStatus(a.slug, "approved"), disabled: actingSlug === a.slug, style: { ...ghostBtnStyle, borderColor: "#4CAF7D66", color: "#8FCB9E" } }, "Approve"),
+                    React.createElement("button", { onClick: () => setStatus(a.slug, "denied"), disabled: actingSlug === a.slug, style: { ...ghostBtnStyle, borderColor: "#E5484D66", color: "#E37C6E" } }, "Deny")))))))),
+        React.createElement("div", null,
+            React.createElement(SectionLabel, null,
+                "Approved Members (",
+                approved.length,
+                ")"),
+            approved.length === 0 ? (React.createElement("div", { style: { ...cardStyle, padding: 20, color: "#6b6252", fontSize: 13 } }, "No approved accounts yet.")) : (React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, approved.map((a) => (React.createElement("div", { key: a.slug, style: { ...cardStyle, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" } },
+                React.createElement("div", { style: { color: "#E9E2D0", fontSize: 13.5 } }, a.name),
+                React.createElement("button", { onClick: () => setStatus(a.slug, "denied"), disabled: actingSlug === a.slug, style: { ...ghostBtnStyle, padding: "6px 12px", fontSize: 12, borderColor: "#E5484D66", color: "#E37C6E" } }, "Revoke"))))))),
+        denied.length > 0 && (React.createElement("div", null,
+            React.createElement(SectionLabel, null,
+                "Denied (",
+                denied.length,
+                ")"),
+            React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, denied.map((a) => (React.createElement("div", { key: a.slug, style: { ...cardStyle, padding: "10px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" } },
+                React.createElement("div", { style: { color: "#8A8072", fontSize: 13.5 } }, a.name),
+                React.createElement("button", { onClick: () => setStatus(a.slug, "approved"), disabled: actingSlug === a.slug, style: { ...ghostBtnStyle, padding: "6px 12px", fontSize: 12, borderColor: "#4CAF7D66", color: "#8FCB9E" } }, "Approve Instead")))))))));
+}
+try {
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    window.__entropyBooted = true;
+    root.render(React.createElement(App, null));
+}
+catch (err) {
+    console.error(err);
+    if (typeof showFatalError === "function")
+        showFatalError(err && err.message, null, null);
+}
+
+</script>
+</body>
+</html>
