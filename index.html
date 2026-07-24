@@ -54,6 +54,7 @@
 
 <script>
 "use strict";
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
 // =============================================================================
 // SHARED DATABASE CONFIG — the GitHub token lives server-side in a Cloudflare
 // Worker (as a secret); this app only talks to the worker, never to GitHub directly.
